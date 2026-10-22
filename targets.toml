@@ -1,0 +1,23 @@
+# What to search for. Edit and re-run; no rebuild needed.
+
+# Wallet the phrase is for (--wallet overrides it):
+#   "telegram"  Telegram's built-in wallet, 12-word phrase        ~7,400 attempts/s on 24 cores
+#   "v4r2"      Tonkeeper / MyTonWallet / Tonhub v4R2, 24-word TON phrase   ~150/s
+#   "v5r1"      Tonkeeper / MyTonWallet W5 (v5R1), 24-word TON phrase       ~150/s
+#   "ledger"    Ledger account #1 (V4R2), 24-word BIP-39 phrase   ~15,000/s
+wallet = "telegram"
+
+# Network the address is derived for: "mainnet" or "testnet".
+network = "mainnet"
+
+# The address wallets show (UQ...) must END with one of these.
+# Allowed characters: A-Z a-z 0-9 _ -
+# Cost grows 64x per character. For one 4-character suffix on 24 cores:
+# telegram ~40 min, ledger ~20 min, v4r2/v5r1 ~31 hours (3 characters: ~30 min).
+suffixes = [
+    "cool",
+    "yeah",
+]
+
+# true: "_omo" also matches "_OMO", "_OmO", "_oMo", ... (faster, letters match 2 ways)
+case_insensitive = false
