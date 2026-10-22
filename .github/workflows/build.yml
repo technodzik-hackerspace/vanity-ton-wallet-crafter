@@ -92,3 +92,18 @@ jobs:
         with:
           files: dist/*
           generate_release_notes: true
+
+  # Builds the flake (what nix-darwin / NixOS installs), including its install-time self-test.
+  nix:
+    name: nix ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, ubuntu-24.04] # aarch64-darwin, x86_64-linux
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+      - run: nix flake check -L
+      - run: nix build -L .#default
+      - run: nix run . -- --wallet ledger --config /dev/null A > /dev/null

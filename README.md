@@ -28,7 +28,37 @@ xattr -d com.apple.quarantine vanity-ton-wallet-crafter  # not Apple-notarized, 
 ./vanity-ton-wallet-crafter
 ```
 
-Or build from source (Rust 1.96.1 or newer):
+### Nix
+
+The flake builds for `aarch64-darwin`, `x86_64-linux` and `aarch64-linux`:
+
+```bash
+nix run github:technodzik-hackerspace/vanity-ton-wallet-crafter -- --wallet v5r1 _TON
+```
+
+With nix-darwin (or NixOS), add the flake as an input and install its package:
+
+```nix
+# flake.nix
+inputs.vanity-ton-wallet-crafter = {
+  url = "github:technodzik-hackerspace/vanity-ton-wallet-crafter";
+  inputs.nixpkgs.follows = "nixpkgs";
+};
+
+# darwin configuration module (gets `inputs` via specialArgs)
+{ inputs, pkgs, ... }: {
+  environment.systemPackages = [
+    inputs.vanity-ton-wallet-crafter.packages.${pkgs.stdenv.hostPlatform.system}.default
+  ];
+}
+```
+
+Or apply `inputs.vanity-ton-wallet-crafter.overlays.default` and use `pkgs.vanity-ton-wallet-crafter`.
+Nix-built binaries need no quarantine step. With `nixpkgs.follows`, your nixpkgs must ship Rust 1.96.1 or newer.
+
+### From source
+
+Rust 1.96.1 or newer:
 
 ```bash
 cargo build --release
