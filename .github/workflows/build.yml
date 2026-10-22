@@ -1,0 +1,109 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  BIN: vanity-ton-wallet-crafter
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin # Apple Silicon (M1-M5)
+            os: macos-14
+            native: true
+          - target: x86_64-apple-darwin # Intel Macs, cross-built on Apple Silicon
+            os: macos-14
+            native: false
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-24.04
+            native: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.97.1" # wallet-engine needs >= 1.96.1
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      # Runs each wallet kind's derivation self-test and a 1-character search.
+      # stdout (the throwaway phrase) is discarded so it never lands in the log.
+      - name: Smoke test
+        if: matrix.native
+        shell: bash
+        run: |
+          for kind in telegram ledger v4r2 v5r1; do
+            echo "== $kind"
+            "target/${{ matrix.target }}/release/$BIN" --wallet "$kind" --config /dev/null A > /dev/null
+          done
+
+      - name: Package
+        id: package
+        shell: bash
+        run: |
+          name="$BIN-${GITHUB_REF_NAME//\//-}-${{ matrix.target }}"
+          mkdir "$name"
+          cp "target/${{ matrix.target }}/release/$BIN" README.md LICENSE-MIT targets.toml "$name/"
+          tar -czf "$name.tar.gz" "$name"
+          shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.name }}
+          path: |
+            ${{ steps.package.outputs.name }}.tar.gz
+            ${{ steps.package.outputs.name }}.tar.gz.sha256
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+
+  # Builds the flake (what nix-darwin / NixOS installs), including its install-time self-test.
+  nix:
+    name: nix ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, ubuntu-24.04] # aarch64-darwin, x86_64-linux
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+      - run: nix flake check -L
+      - run: nix build -L .#default
+      - run: nix run . -- --wallet ledger --config /dev/null A > /dev/null
