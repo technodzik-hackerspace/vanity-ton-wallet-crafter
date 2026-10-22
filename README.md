@@ -12,14 +12,32 @@ It finds a recovery phrase whose wallet address ends with a suffix you choose, e
 | `v5r1`     | Tonkeeper / MyTonWallet, W5 (v5R1)          | 24 words, TON mnemonic |
 | `ledger`   | Ledger TON app, account #1 (V4R2 contract)  | 24 words, BIP-39       |
 
-## Usage
+## Install
 
-Edit `targets.toml`, then:
+Prebuilt binaries for macOS (Apple Silicon and Intel) and Linux x86_64 are attached to each
+[release](https://github.com/technodzik-hackerspace/vanity-ton-wallet-crafter/releases).
+Every CI run also keeps them as workflow artifacts.
+
+On a Mac with Apple Silicon (M1–M5):
+
+```bash
+shasum -a 256 -c vanity-ton-wallet-crafter-*-aarch64-apple-darwin.tar.gz.sha256
+tar -xzf vanity-ton-wallet-crafter-*-aarch64-apple-darwin.tar.gz
+cd vanity-ton-wallet-crafter-*-aarch64-apple-darwin
+xattr -d com.apple.quarantine vanity-ton-wallet-crafter  # not Apple-notarized, so Gatekeeper blocks it
+./vanity-ton-wallet-crafter
+```
+
+Or build from source (Rust 1.96.1 or newer):
 
 ```bash
 cargo build --release
 ./target/release/vanity-ton-wallet-crafter
 ```
+
+## Usage
+
+Edit `targets.toml`, then run the binary.
 
 Options:
 
