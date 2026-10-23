@@ -83,9 +83,9 @@ Before searching, it checks the derivation for the chosen wallet against known t
 
 ## How the address is derived
 
-**telegram**: every candidate goes through Telegram's own [wallet engine](https://github.com/dkaraush/wallet-engine)
-(`WalletLifecycle::import_wallet`), pinned to the revision Telegram Android 13.0.2 ships.
-The engine runs exactly what the app runs when you import a phrase:
+**telegram**: what Telegram's own [wallet engine](https://github.com/dkaraush/wallet-engine) derives on import,
+pinned to the revision Telegram Android 13.0.2 ships. A hit is re-checked through the engine's
+`WalletLifecycle::import_wallet`, exactly what the app runs when you import a phrase:
 
 ```
 12 words (BIP-39, 128-bit entropy)
@@ -113,19 +113,24 @@ v5r1: data = signatures on | seqno 0 | wallet id 0x7FFFFF11 (testnet 0x7FFFFFFD)
   → V4R2, subwallet 698983191
 ```
 
+The search derives eight phrases at once with AVX-512 when the CPU has it (AMD Zen 4 and later,
+Intel Xeon; not most Intel desktop chips or Apple Silicon). Every hit is then derived again, one
+phrase at a time, through the engine, the `ton` SDK or the `pbkdf2` crate, and must give the same address.
+
 Wallets show the non-bounceable form (`UQ…`); the bounceable form (`EQ…`) ends differently.
 A hit whose phrase also validates under another scheme (for example, a TON phrase that is also
 valid BIP-39) is skipped, so wallet apps cannot import it as a different wallet.
 
 ## Cost
 
-Every suffix character multiplies the search by 64. Measured on 24 cores:
+Every suffix character multiplies the search by 64. Measured on a Ryzen AI Max+ 395
+(16 cores, 32 threads, AVX-512); without AVX-512 the same CPU is about 5.5 times slower:
 
 | wallet | attempts/s | 3 chars | 4 chars | 5 chars |
 |---|---|---|---|---|
-| `ledger` | ~14,900 | ~18 s | ~20 min | ~20 hours |
-| `telegram` | ~7,400 | ~35 s | ~40 min | ~1.7 days |
-| `v4r2`, `v5r1` | ~150 | ~30 min | ~31 hours | ~80 days |
+| `telegram` | ~147,000 | ~2 s | ~2 min | ~2 hours |
+| `ledger` | ~142,000 | ~2 s | ~2 min | ~2 hours |
+| `v4r2`, `v5r1` | ~1,600 | ~3 min | ~3 hours | ~8 days |
 
 The TON mnemonic is slow by design (about 200,000 PBKDF2 rounds per usable phrase).
 Several acceptable suffixes, or `case_insensitive = true`, shorten it proportionally.
