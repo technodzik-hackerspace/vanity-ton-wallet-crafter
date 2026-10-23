@@ -9,6 +9,7 @@
 //! Usage: vanity-ton-wallet-crafter [--config FILE] [--wallet KIND] [--threads N] [SUFFIX...]
 //! Targets come from `targets.toml`; options and suffixes on the command line override it.
 
+mod pbkdf2x8;
 mod wallet;
 
 use std::path::PathBuf;
@@ -217,12 +218,13 @@ fn main() {
         args.suffixes.iter().map(|s| suffix_probability(s, args.case_insensitive)).sum();
     let expected = 1.0 / hit_probability;
     eprintln!(
-        "searching {:?}{} for {} on {:?} with {} threads; expected ~{:.2}M attempts",
+        "searching {:?}{} for {} on {:?} with {} threads ({}); expected ~{:.2}M attempts",
         args.suffixes,
         if args.case_insensitive { " (case-insensitive)" } else { "" },
         args.kind.describe(),
         args.network,
         args.threads,
+        if pbkdf2x8::simd_available() { "AVX-512, 8 lanes each" } else { "scalar" },
         expected / 1e6
     );
 
@@ -245,9 +247,12 @@ fn main() {
             let case_insensitive = args.case_insensitive;
             std::thread::spawn(move || {
                 while !found.load(Ordering::Relaxed) {
-                    let candidate = deriver.derive(deriver.random_words());
-                    attempts.fetch_add(1, Ordering::Relaxed);
-                    if matches(&candidate.address, &suffixes, case_insensitive) {
+                    let batch = deriver.derive_batch(deriver.random_batch());
+                    attempts.fetch_add(batch.len() as u64, Ordering::Relaxed);
+                    for candidate in batch {
+                        if !matches(&candidate.address, &suffixes, case_insensitive) {
+                            continue;
+                        }
                         if !deriver.is_unambiguous(&candidate.words) {
                             ambiguous.fetch_add(1, Ordering::Relaxed);
                             continue;

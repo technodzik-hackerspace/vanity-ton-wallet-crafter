@@ -27,6 +27,15 @@ use wallet_engine::{
 use zeroize::Zeroizing;
 
 use crate::DiscardHost;
+use crate::pbkdf2x8::{self, LANES, pbkdf2_hmac_sha512_x8};
+
+const BIP39_SALT: &[u8] = b"mnemonic";
+const BIP39_ROUNDS: u32 = 2048;
+const TON_SEED_VERSION_SALT: &[u8] = b"TON seed version";
+const TON_KEY_SALT: &[u8] = b"TON default seed";
+const TON_ROUNDS: u32 = 100_000;
+/// wallet-engine's `TON_ACCOUNT_PATH`, the anchor key of a Telegram wallet on either network.
+const TELEGRAM_PATH: [u32; 3] = [44, 607, 0];
 
 /// BIP-39 test vectors: all-zero entropy, and the anchor key wallet-engine pins for the 12-word one.
 const ZERO_ENTROPY_PHRASE_12: &str =
@@ -111,76 +120,126 @@ impl Deriver {
         Self { kind, network, lifecycle: WalletLifecycle::new(Arc::new(DiscardHost)), wordlist }
     }
 
-    /// A fresh phrase from the OS CSPRNG, valid for this wallet kind.
-    pub fn random_words(&self) -> Vec<String> {
+    /// `LANES` fresh phrases from the OS CSPRNG, valid for this wallet kind.
+    pub fn random_batch(&self) -> Vec<Vec<String>> {
         match self.kind {
-            WalletKind::Telegram => {
-                let mut entropy = Zeroizing::new([0_u8; 16]);
-                getrandom::fill(entropy.as_mut()).expect("OS random generator failed");
-                entropy_to_words(entropy.as_ref(), &self.wordlist)
-            }
-            WalletKind::Ledger => {
-                let mut entropy = Zeroizing::new([0_u8; 32]);
-                getrandom::fill(entropy.as_mut()).expect("OS random generator failed");
-                entropy_to_words(entropy.as_ref(), &self.wordlist)
-            }
+            WalletKind::Telegram => (0..LANES).map(|_| self.random_bip39_words::<16>()).collect(),
+            WalletKind::Ledger => (0..LANES).map(|_| self.random_bip39_words::<32>()).collect(),
             // As TON wallets generate it: 24 uniform words, redrawn until the seed is a "basic" one.
-            WalletKind::V4R2 | WalletKind::V5R1 => loop {
-                let mut random = Zeroizing::new([0_u8; 48]);
-                getrandom::fill(random.as_mut()).expect("OS random generator failed");
-                // 2048 = 2^11 words, so the low 11 bits of each u16 pick one without bias.
-                let words: Vec<String> = random
-                    .chunks_exact(2)
-                    .map(|pair| u16::from_be_bytes([pair[0], pair[1]]) & 0x7FF)
-                    .map(|index| self.wordlist[usize::from(index)].clone())
-                    .collect();
-                if ton_mnemonic(&words).is_some() {
-                    return words;
+            WalletKind::V4R2 | WalletKind::V5R1 => {
+                let mut phrases = Vec::with_capacity(LANES);
+                while phrases.len() < LANES {
+                    let draws: Vec<Vec<String>> = (0..LANES).map(|_| self.uniform_words()).collect();
+                    let entropies: Vec<_> = draws.iter().map(|words| ton_entropy(words)).collect();
+                    let seeds = pbkdf2_hmac_sha512_x8(
+                        &lanes(entropies.iter().map(|e| e.as_slice())),
+                        TON_SEED_VERSION_SALT,
+                        TON_ROUNDS / 256,
+                    );
+                    let basic = draws.into_iter().zip(seeds.iter()).filter(|(_, seed)| seed[0] == 0);
+                    phrases.extend(basic.map(|(words, _)| words));
                 }
-            },
+                phrases.truncate(LANES);
+                phrases
+            }
         }
     }
 
+    fn random_bip39_words<const ENTROPY: usize>(&self) -> Vec<String> {
+        let mut entropy = Zeroizing::new([0_u8; ENTROPY]);
+        getrandom::fill(entropy.as_mut()).expect("OS random generator failed");
+        entropy_to_words(entropy.as_ref(), &self.wordlist)
+    }
+
+    fn uniform_words(&self) -> Vec<String> {
+        let mut random = Zeroizing::new([0_u8; 48]);
+        getrandom::fill(random.as_mut()).expect("OS random generator failed");
+        // 2048 = 2^11 words, so the low 11 bits of each u16 pick one without bias.
+        random
+            .chunks_exact(2)
+            .map(|pair| u16::from_be_bytes([pair[0], pair[1]]) & 0x7FF)
+            .map(|index| self.wordlist[usize::from(index)].clone())
+            .collect()
+    }
+
+    /// The search path: up to `LANES` phrases through one batched PBKDF2.
+    pub fn derive_batch(&self, phrases: Vec<Vec<String>>) -> Vec<Candidate> {
+        assert!(phrases.len() <= LANES, "batch larger than {LANES}");
+        let keys: Vec<Zeroizing<[u8; 32]>> = match self.kind {
+            WalletKind::Telegram | WalletKind::Ledger => {
+                let joined: Vec<_> = phrases.iter().map(|words| Zeroizing::new(words.join(" "))).collect();
+                let seeds = pbkdf2_hmac_sha512_x8(
+                    &lanes(joined.iter().map(|phrase| phrase.as_bytes())),
+                    BIP39_SALT,
+                    BIP39_ROUNDS,
+                );
+                let ledger_path = self.ledger_path();
+                let path: &[u32] = if self.kind == WalletKind::Telegram { &TELEGRAM_PATH } else { &ledger_path };
+                seeds[..phrases.len()].iter().map(|seed| slip10_ed25519(seed, path)).collect()
+            }
+            WalletKind::V4R2 | WalletKind::V5R1 => {
+                let entropies: Vec<_> = phrases.iter().map(|words| ton_entropy(words)).collect();
+                let seeds = pbkdf2_hmac_sha512_x8(
+                    &lanes(entropies.iter().map(|e| e.as_slice())),
+                    TON_KEY_SALT,
+                    TON_ROUNDS,
+                );
+                seeds[..phrases.len()]
+                    .iter()
+                    .map(|seed| {
+                        let mut key = Zeroizing::new([0_u8; 32]);
+                        key.copy_from_slice(&seed[..32]);
+                        key
+                    })
+                    .collect()
+            }
+        };
+        phrases.into_iter().zip(keys).map(|(words, key)| self.candidate(words, key_pair(&key))).collect()
+    }
+
+    /// The reference path, one phrase at a time through the code each wallet itself runs:
+    /// wallet-engine's anchor key for Telegram, the `ton` crate's mnemonic for V4R2 / V5R1,
+    /// and the `pbkdf2` crate for Ledger. Confirms hits and checks `derive_batch`.
     pub fn derive(&self, words: Vec<String>) -> Candidate {
-        let mainnet = self.network == Network::Mainnet;
-        let wallet = match self.kind {
+        let key_pair = match self.kind {
             // `import_wallet` derives the anchor and the signing key, which for a 12-word phrase
             // are the same derivation run twice. Only the anchor sets the address, so derive it
             // alone; `confirm` re-checks the hit through the full import.
             WalletKind::Telegram => {
                 let anchor = wallet_engine::rotation_mnemonic_public_key(words.join(" "))
                     .expect("engine rejected a generated phrase");
-                let public_key = anchor.as_slice().try_into().expect("32-byte key");
-                let wallet_id =
-                    if mainnet { WALLET_SUBWALLET_ID_DEFAULT } else { WALLET_SUBWALLET_ID_DEFAULT_TESTNET };
-                let key_pair = KeyPair { public_key, secret_key: [0; 64] };
-                TonWallet::new_with_params(WalletVersion::Wallet, key_pair, 0, wallet_id)
+                KeyPair { public_key: anchor.as_slice().try_into().expect("32-byte key"), secret_key: [0; 64] }
             }
-            WalletKind::V4R2 | WalletKind::V5R1 => {
-                let key_pair = ton_mnemonic(&words)
-                    .expect("not a TON mnemonic")
-                    .to_key_pair()
-                    .expect("TON key derivation failed");
-                let (version, wallet_id) = match (self.kind, mainnet) {
-                    (WalletKind::V4R2, _) => (WalletVersion::V4R2, WALLET_ID_DEFAULT),
-                    (_, true) => (WalletVersion::V5R1, WALLET_V5R1_ID_DEFAULT),
-                    (_, false) => (WalletVersion::V5R1, WALLET_V5R1_ID_DEFAULT_TESTNET),
-                };
-                TonWallet::new_with_params(version, key_pair, 0, wallet_id)
-            }
-            WalletKind::Ledger => {
-                let seed = bip39_seed(&words);
-                let network_index = if mainnet { 0 } else { 1 };
-                let key = slip10_ed25519(seed.as_ref(), &[44, 607, network_index, 0, 0, 0]);
-                TonWallet::new_with_params(WalletVersion::V4R2, key_pair(&key), 0, WALLET_ID_DEFAULT)
-            }
-        }
-        .expect("wallet address derivation failed");
+            WalletKind::V4R2 | WalletKind::V5R1 => ton_mnemonic(&words)
+                .expect("not a TON mnemonic")
+                .to_key_pair()
+                .expect("TON key derivation failed"),
+            WalletKind::Ledger => key_pair(&slip10_ed25519(bip39_seed(&words).as_ref(), &self.ledger_path())),
+        };
+        self.candidate(words, key_pair)
+    }
+
+    fn candidate(&self, words: Vec<String>, key_pair: KeyPair) -> Candidate {
+        let mainnet = self.network == Network::Mainnet;
+        let (version, wallet_id) = match (self.kind, mainnet) {
+            (WalletKind::Telegram, true) => (WalletVersion::Wallet, WALLET_SUBWALLET_ID_DEFAULT),
+            (WalletKind::Telegram, false) => (WalletVersion::Wallet, WALLET_SUBWALLET_ID_DEFAULT_TESTNET),
+            (WalletKind::V4R2 | WalletKind::Ledger, _) => (WalletVersion::V4R2, WALLET_ID_DEFAULT),
+            (WalletKind::V5R1, true) => (WalletVersion::V5R1, WALLET_V5R1_ID_DEFAULT),
+            (WalletKind::V5R1, false) => (WalletVersion::V5R1, WALLET_V5R1_ID_DEFAULT_TESTNET),
+        };
+        let wallet = TonWallet::new_with_params(version, key_pair, 0, wallet_id)
+            .expect("wallet address derivation failed");
         Candidate {
             words,
             address: wallet.address.to_base64(mainnet, false, true),
             public_key: wallet.key_pair.public_key,
         }
+    }
+
+    fn ledger_path(&self) -> [u32; 6] {
+        let network_index = if self.network == Network::Mainnet { 0 } else { 1 };
+        [44, 607, network_index, 0, 0, 0]
     }
 
     /// False when the phrase also validates under another scheme, so a wallet app could
@@ -250,6 +309,21 @@ impl Deriver {
                 assert_eq!(self.derive(split(TON_V5R1_PHRASE)).address, expected, "V5R1 self-test failed");
             }
         }
+
+        // The batched PBKDF2 against the `pbkdf2` crate, with passwords from empty to past one block.
+        let passwords: Vec<Vec<u8>> = (0..LANES).map(|lane| vec![lane as u8 + 1; lane * 37]).collect();
+        let passwords = lanes(passwords.iter().map(Vec::as_slice));
+        assert_eq!(
+            *pbkdf2_hmac_sha512_x8(&passwords, BIP39_SALT, 3),
+            *pbkdf2x8::scalar(&passwords, BIP39_SALT, 3),
+            "batched PBKDF2 self-test failed"
+        );
+        // A full search batch against the reference path, which for TON also rechecks the
+        // batched "basic seed" filter.
+        let phrases = self.random_batch();
+        for (batched, words) in self.derive_batch(phrases.clone()).into_iter().zip(phrases) {
+            assert_eq!(batched.address, self.derive(words).address, "batched derivation self-test failed");
+        }
     }
 
     fn import(&self, words: Vec<String>) -> WalletDescriptor {
@@ -280,6 +354,21 @@ fn entropy_to_words(entropy: &[u8], wordlist: &[String]) -> Vec<String> {
         .collect()
 }
 
+/// The HMAC-SHA512 of a passwordless TON mnemonic, keyed by the space-joined phrase.
+fn ton_entropy(words: &[String]) -> Zeroizing<[u8; 64]> {
+    let phrase = Zeroizing::new(words.join(" "));
+    hmac_sha512(phrase.as_bytes(), &[])
+}
+
+/// The first `LANES` inputs as PBKDF2 lanes; missing lanes get an empty password.
+fn lanes<'a>(inputs: impl Iterator<Item = &'a [u8]>) -> [&'a [u8]; LANES] {
+    let mut lanes = [&[][..]; LANES];
+    for (lane, input) in lanes.iter_mut().zip(inputs) {
+        *lane = input;
+    }
+    lanes
+}
+
 /// Parses a passwordless TON mnemonic; `None` unless its seed is a "basic" one.
 fn ton_mnemonic(words: &[String]) -> Option<Mnemonic> {
     Mnemonic::new(words.iter().map(String::as_str).collect(), None).ok()
@@ -289,7 +378,7 @@ fn ton_mnemonic(words: &[String]) -> Option<Mnemonic> {
 fn bip39_seed(words: &[String]) -> Zeroizing<[u8; 64]> {
     let phrase = Zeroizing::new(words.join(" "));
     let mut seed = Zeroizing::new([0_u8; 64]);
-    pbkdf2_hmac::<Sha512>(phrase.as_bytes(), b"mnemonic", 2048, seed.as_mut());
+    pbkdf2_hmac::<Sha512>(phrase.as_bytes(), BIP39_SALT, BIP39_ROUNDS, seed.as_mut());
     seed
 }
 
