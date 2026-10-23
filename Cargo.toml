@@ -11,7 +11,7 @@ description = "Offline vanity-address generator for TON wallets: Telegram, V4R2,
 
 [dependencies]
 # Telegram's own wallet engine (the submodule telegram-android ships), pinned to the
-# revision Telegram Android 13.0.2 builds. Telegram candidates are derived by its import path.
+# revision Telegram Android 13.0.2 builds. Telegram keys come from it; hits are re-checked by its import path.
 wallet-engine = { git = "https://github.com/dkaraush/wallet-engine.git", rev = "5c65e47cb8d68727c20d89382d0bc51292486b9a" }
 # The TON SDK that same revision vendors: V4R2 / V5R1 contract code and the TON mnemonic scheme.
 ton = { git = "https://github.com/dkaraush/wallet-engine.git", rev = "5c65e47cb8d68727c20d89382d0bc51292486b9a", default-features = false }

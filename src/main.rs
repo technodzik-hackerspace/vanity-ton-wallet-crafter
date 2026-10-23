@@ -2,8 +2,8 @@
 //!
 //! Generates random recovery phrases for the chosen wallet kind (Telegram, V4R2, V5R1 or
 //! Ledger, see `wallet.rs`) and derives each address exactly as that wallet does.
-//! Telegram candidates go through wallet-engine's own `WalletLifecycle::import_wallet`,
-//! the code path the Telegram app runs on import.
+//! Telegram candidates take their anchor key from wallet-engine, and every hit is re-checked
+//! through its `WalletLifecycle::import_wallet`, the code path the Telegram app runs on import.
 //! Nothing touches the network; secrets are never written to disk.
 //!
 //! Usage: vanity-ton-wallet-crafter [--config FILE] [--wallet KIND] [--threads N] [SUFFIX...]

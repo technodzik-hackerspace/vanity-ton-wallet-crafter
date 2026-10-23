@@ -2,7 +2,7 @@
 //!
 //! | kind       | phrase                         | key                                   | contract |
 //! |------------|--------------------------------|---------------------------------------|----------|
-//! | `telegram` | 12-word BIP-39                 | wallet-engine `import_wallet`         | Telegram trampoline |
+//! | `telegram` | 12-word BIP-39                 | wallet-engine anchor key              | Telegram wallet, subwallet 0x7FFF7F11 (testnet 0x7FFF7FFD) |
 //! | `v4r2`     | 24-word TON mnemonic           | PBKDF2 "TON default seed" (100k)      | V4R2, subwallet 698983191 |
 //! | `v5r1`     | 24-word TON mnemonic           | PBKDF2 "TON default seed" (100k)      | V5R1, wallet id 0x7FFFFF11 (testnet 0x7FFFFFFD) |
 //! | `ledger`   | 24-word BIP-39                 | SLIP-10 m/44'/607'/net'/0'/0'/0'      | V4R2, subwallet 698983191 |
@@ -17,8 +17,9 @@ use hmac::{Hmac, Mac as _};
 use pbkdf2::pbkdf2_hmac;
 use sha2::{Digest as _, Sha256, Sha512};
 use ton::ton_wallet::{
-    KeyPair, Mnemonic, TonWallet, WALLET_ID_DEFAULT, WALLET_V5R1_ID_DEFAULT,
-    WALLET_V5R1_ID_DEFAULT_TESTNET, WalletVersion,
+    KeyPair, Mnemonic, TonWallet, WALLET_ID_DEFAULT, WALLET_SUBWALLET_ID_DEFAULT,
+    WALLET_SUBWALLET_ID_DEFAULT_TESTNET, WALLET_V5R1_ID_DEFAULT, WALLET_V5R1_ID_DEFAULT_TESTNET,
+    WalletVersion,
 };
 use wallet_engine::{
     ImportWalletRequest, MnemonicScheme, Network, TonAddressFormat, WalletDescriptor, WalletLifecycle,
@@ -143,10 +144,17 @@ impl Deriver {
     pub fn derive(&self, words: Vec<String>) -> Candidate {
         let mainnet = self.network == Network::Mainnet;
         let wallet = match self.kind {
+            // `import_wallet` derives the anchor and the signing key, which for a 12-word phrase
+            // are the same derivation run twice. Only the anchor sets the address, so derive it
+            // alone; `confirm` re-checks the hit through the full import.
             WalletKind::Telegram => {
-                let descriptor = self.import(words.clone());
-                let public_key = descriptor.public_key.as_slice().try_into().expect("32-byte key");
-                return Candidate { words, address: descriptor.address.as_str().to_owned(), public_key };
+                let anchor = wallet_engine::rotation_mnemonic_public_key(words.join(" "))
+                    .expect("engine rejected a generated phrase");
+                let public_key = anchor.as_slice().try_into().expect("32-byte key");
+                let wallet_id =
+                    if mainnet { WALLET_SUBWALLET_ID_DEFAULT } else { WALLET_SUBWALLET_ID_DEFAULT_TESTNET };
+                let key_pair = KeyPair { public_key, secret_key: [0; 64] };
+                TonWallet::new_with_params(WalletVersion::Wallet, key_pair, 0, wallet_id)
             }
             WalletKind::V4R2 | WalletKind::V5R1 => {
                 let key_pair = ton_mnemonic(&words)
@@ -219,7 +227,9 @@ impl Deriver {
                 let anchor = wallet_engine::rotation_mnemonic_public_key(ZERO_ENTROPY_PHRASE_12.to_owned())
                     .expect("engine rejected the BIP-39 test vector");
                 assert_eq!(hex(&anchor), ZERO_ENTROPY_ANCHOR_KEY, "anchor-key self-test failed");
-                assert_eq!(self.import(zero12).public_key, anchor, "import self-test failed");
+                let descriptor = self.import(zero12.clone());
+                assert_eq!(descriptor.public_key, anchor, "import self-test failed");
+                assert_eq!(self.derive(zero12).address, descriptor.address.as_str(), "address self-test failed");
             }
             WalletKind::Ledger => {
                 // Our BIP-39 seed + SLIP-10 reproduce the engine's pinned m/44'/607'/0' key.
